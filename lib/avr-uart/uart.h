@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <avr/io.h>
+#include <stdio.h>
 
 #if (__GNUC__ * 100 + __GNUC_MINOR__) < 304
 #error "This library requires AVR-GCC 3.4 or later, update to newer AVR-GCC compiler !"
@@ -35,6 +36,7 @@ static volatile uint8_t protocolState;
 
 message_t* uart0_init(uint16_t baudrate);
 void uart0_putc(uint8_t data);
+int uart0_putc_stream( char c, FILE *stream );
 void uart0_puts(const char *s );
 void uart0_flush(void);
 

@@ -105,9 +105,18 @@ void uart0_puts(const char *s )
 
 } /* uart0_puts */
 
+// for redirection of stdout do
+// global: static FILE mystdout = FDEV_SETUP_STREAM( uart_putchar, NULL, _FDEV_SETUP_WRITE );
+// after init: stdout = &mystdout;
 
+int uart0_putc_stream( char c, FILE *stream )
+{
+    if( c == '\n' )
+        uart0_putc_stream( '\r', stream );
 
-
+    uart0_putc(c);
+    return 0;
+}
 
 void uart0_flush(void)
 {
