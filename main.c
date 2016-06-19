@@ -6,7 +6,8 @@
 
 
 #define BUS_ADDRESS 1
-#define TRIGGER_SIGNAL_LENGTH_MS 10
+#define TRIGGER_SIGNAL_LENGTH_MS 15UL
+#define LONGEST_CAM_DELAY_MS 100UL
 message_t* serialMessage;
 
 void initTimer();
@@ -14,6 +15,8 @@ void startTimer();
 void stopTimer();
 void sortTriggers();
 void pollSerial();
+void enableExternalInterrupt1();
+void disableExternalInterrupt1();
 
 static FILE mystdout = FDEV_SETUP_STREAM( uart0_putc, NULL, _FDEV_SETUP_WRITE );
 
@@ -30,12 +33,21 @@ static uint16_t sequenceDelay = 0;
 
 int main()
 {
-    DDRA = 0xFF;
-    DDRC = 0xFF;
 
-    DDRD |= _BV(PD5);
+    DDRA = 0xFF; // Enable Trigger Output Ports
+    DDRC = 0xFF; // Enable Trigger Output Ports
+
+    PORTA = 0xFF; // Enable Trigger Output Ports
+    PORTB = 0xFF; // Enable Trigger Output Ports
+
+
+    DDRD |= _BV(PD5) | _BV(PD4); // Enable RTS Output and Analog Trigger Output
     PORTD &= ~_BV(PD5); // Enable Receiving
-    //PORTD |= _BV(PD5); // Enable Sending
+
+    PORTD |= _BV(PD4); // Set Analog Trigger Output to High
+
+    PORTD |= _BV(PD3); // Enable Pullup on INT1
+
     sei();
     uint16_t baud = 9600;
     serialMessage = uart0_init(baud);
@@ -46,11 +58,12 @@ int main()
 
     for (uint16_t i=0;i<16;i++)
     {
-        triggerPositions[i]=50;//+10*i;
+        triggerPositions[i]=LONGEST_CAM_DELAY_MS-(5*i);
     }
     sortTriggers();
 
     initTimer();
+    enableExternalInterrupt1();
 
     while(1)
     {
@@ -92,15 +105,18 @@ void sortTriggers()
 
 void startTimer()
 {
+    PORTD |= _BV(PD4); // reset analog trigger output if it was triggered
     TCNT0 = 0;
     milliseconds = 0;
     TCCR0B = 0b00000011;
+
 }
 void stopTimer()
 {
     TCCR0B = 0b00000000;
     TCNT0 = 0;
     milliseconds = 0;
+    enableExternalInterrupt1();
 }
 
 void initTimer()
@@ -133,9 +149,16 @@ void initTimer()
 
 }
 
+//######### External Interrupt  ############
+ISR (INT1_vect)
+{
+    startTimer();
+}
+
 //######### 1ms Timer Interrupt ############
 ISR (TIMER0_COMPA_vect)
 {
+    disableExternalInterrupt1();
     if (milliseconds == 0)
     {
         currentTriggerOnIndex = 0;
@@ -150,9 +173,9 @@ ISR (TIMER0_COMPA_vect)
         {
             if (sortedPortsToTrigger[tmpIndex]<8)
             {
-                PORTA |= 1<<sortedPortsToTrigger[tmpIndex];
+                PORTA &= ~(1<<sortedPortsToTrigger[tmpIndex]);
             } else {
-                PORTC |= 1<<(sortedPortsToTrigger[tmpIndex]-8);
+                PORTC &= ~(1<<(sortedPortsToTrigger[tmpIndex]-8));
             }
             tmpIndex++;
         }
@@ -166,17 +189,43 @@ ISR (TIMER0_COMPA_vect)
         {
             if (sortedPortsToTrigger[tmpIndex]<8)
             {
-                PORTA &= ~(1<<sortedPortsToTrigger[tmpIndex]);
+                PORTA |= 1<<sortedPortsToTrigger[tmpIndex];
             } else {
-                PORTC &= ~(1<<(sortedPortsToTrigger[tmpIndex]-8));
+                PORTC |= 1<<(sortedPortsToTrigger[tmpIndex]-8);
             }
             tmpIndex++;
         }
 
         currentTriggerOffIndex=tmpIndex;
     }
+
+    if (currentTriggerOnIndex<16 && milliseconds>=sortedTriggerPositions[currentTriggerOnIndex])
+    {
+        uint8_t tmpIndex = currentTriggerOnIndex;
+        while(milliseconds == sortedTriggerPositions[tmpIndex])
+        {
+            if (sortedPortsToTrigger[tmpIndex]<8)
+            {
+                PORTA &= ~(1<<sortedPortsToTrigger[tmpIndex]);
+            } else {
+                PORTC &= ~(1<<(sortedPortsToTrigger[tmpIndex]-8));
+            }
+            tmpIndex++;
+        }
+        currentTriggerOnIndex=tmpIndex;
+    }
+
+    // ######### Special Cases:
+    // Last Trigger switched off
     if (currentTriggerOffIndex >=16)
+    {
         stopTimer();
+    }
+    // ######### Pass on trigger to next box for sequencing
+    if ((milliseconds)>=15*LONGEST_CAM_DELAY_MS)
+    {
+        PORTD &= ~(_BV(PD4)); // trigger analog trigger output
+    }
 }
 
 void pollSerial()
@@ -227,7 +276,7 @@ void pollSerial()
                 if (port < 16)
                 {
                     uint16_t value = ((uint16_t) (serialMessage->message[1])<<8) + (uint16_t) (serialMessage->message[2]);
-                    triggerPositions[port] = value;
+                    triggerPositions[port] = LONGEST_CAM_DELAY_MS - value;
                     sortTriggers();
                     uart0_putc(0x01);
                     uart0_putc(BUS_ADDRESS);
@@ -266,6 +315,15 @@ void pollSerial()
                 uart0_puts("Starting Timer");
                 uart0_putc(0);
                 break;
+            case 0x0a:
+                stopTimer();
+                uart0_putc(0x01);
+                uart0_putc(BUS_ADDRESS);
+                uart0_putc(14);
+                uart0_putc(serialMessage->command);
+                uart0_puts("Stopping Timer");
+                uart0_putc(0);
+                break;
             default:
                 uart0_putc(0x01);
                 uart0_putc(BUS_ADDRESS);
@@ -279,4 +337,15 @@ void pollSerial()
         serialMessage->status = PROCESSED;
     }
 
+}
+
+void enableExternalInterrupt1()
+{
+    EICRA |= _BV(ISC11); // External INT1 trigger on falling edge
+    EIMSK |= _BV(INT1);  // Enable INT1 Interrupt
+}
+
+void disableExternalInterrupt1()
+{
+    EIMSK &= ~(_BV(INT1));  // Enable INT1 Interrupt
 }
